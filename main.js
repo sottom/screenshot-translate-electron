@@ -1240,13 +1240,69 @@ async function tryCaptureFromClipboard() {
   }
 }
 
+function hasJapaneseText(value) {
+  // Hiragana, Katakana (incl. phonetic extensions), Kanji, and Japanese punctuation marks.
+  return /[\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f]/.test(value || '');
+}
+
+async function tryProcessTextFromClipboard() {
+  const text = (clipboard.readText() || '').trim();
+  if (!text) return null;
+  if (!hasJapaneseText(text)) return null;
+
+  pushOverlayResult({
+    statusType: 'result-loading',
+    originalLoading: true,
+    definitionLoading: true,
+    translationLoading: settings.translationEnabled
+  });
+
+  const tokenPromise = tokenizeAndLookup(text);
+  const translationPromise = settings.translationEnabled ? translateSentence(text) : Promise.resolve('');
+
+  pushOverlayResult({ statusType: 'result-partial', original: text, originalLoading: false });
+
+  tokenPromise.then((tokenResult) => {
+    pushOverlayResult({
+      statusType: 'result-partial',
+      tokens: tokenResult.tokens,
+      definition: tokenResult.definition,
+      original: text,
+      originalLoading: false,
+      definitionLoading: false
+    });
+  }).catch(() => {
+    pushOverlayResult({ statusType: 'result-partial', definition: 'Failed to tokenize clipboard text.', definitionLoading: false });
+  });
+
+  translationPromise.then((translation) => {
+    pushOverlayResult({ statusType: 'result-partial', translation, translationLoading: false });
+  }).catch(() => {
+    pushOverlayResult({ statusType: 'result-partial', translation: 'Translation failed.', translationLoading: false });
+  });
+
+  const [tokenResult, translation] = await Promise.all([tokenPromise, translationPromise]);
+  return {
+    tokens: tokenResult.tokens,
+    definition: tokenResult.definition,
+    original: text,
+    translation,
+    source: 'clipboard-text',
+    debug: debugMode ? { ...(tokenResult.debug || {}) } : undefined
+  };
+}
+
 async function handleGlobalCaptureHotkey() {
-  const clipboardResult = await tryCaptureFromClipboard();
-  if (clipboardResult) return clipboardResult;
+  const clipboardTextResult = await tryProcessTextFromClipboard();
+  if (clipboardTextResult) return clipboardTextResult;
+
+  const clipboardImageResult = await tryCaptureFromClipboard();
+  if (clipboardImageResult) return clipboardImageResult;
+
   pushOverlayResult({
     statusType: 'result-partial',
-    original: 'No image found in clipboard.',
-    definition: 'Take a screenshot to clipboard first, then press the hotkey again.',
+    original: 'No supported clipboard content found.',
+    definition: 'Copy Japanese text or take a screenshot to clipboard, then press the hotkey again.',
     translation: '',
     originalLoading: false,
     definitionLoading: false,
