@@ -493,10 +493,11 @@ function getNextWorkdayStart(now = new Date()) {
 }
 
 function getDueReviewCards(now = new Date()) {
-  const nowMs = now.getTime();
+  const { end } = getWorkdayBounds(now);
+  const endMs = end.getTime();
   return reviewWords.filter((entry) => {
     const dueMs = Date.parse(entry?.dueAt || '');
-    return Number.isFinite(dueMs) && dueMs <= nowMs;
+    return Number.isFinite(dueMs) && dueMs <= endMs;
   });
 }
 
@@ -544,6 +545,7 @@ function getNextDueSlot(now = new Date()) {
     reviewScheduleState = buildDailyReviewSchedule(now);
   }
   if (!reviewScheduleState) return null;
+  let earliestFuture = null;
   for (const slot of reviewScheduleState.slots) {
     if (reviewScheduleState.consumed.has(slot.id)) continue;
     const entry = reviewWords.find((word) => word.id === slot.id);
@@ -553,15 +555,22 @@ function getNextDueSlot(now = new Date()) {
     }
     const dueMs = Date.parse(entry.dueAt || '');
     if (!Number.isFinite(dueMs) || dueMs > now.getTime()) {
-      reviewScheduleState.consumed.add(slot.id);
+      if (Number.isFinite(dueMs)) {
+        const candidateAtMs = Math.max(slot.atMs, dueMs);
+        if (!earliestFuture || candidateAtMs < earliestFuture.atMs) {
+          earliestFuture = { id: slot.id, atMs: candidateAtMs };
+        }
+      } else {
+        reviewScheduleState.consumed.add(slot.id);
+      }
       continue;
     }
     return slot;
   }
-  return null;
+  return earliestFuture;
 }
 
-function getReviewMeta(now = new Date()) {
+function getReviewMeta(now = new Date(), options = {}) {
   const { start } = getWorkdayBounds(now);
   const key = `${start.getFullYear()}-${start.getMonth() + 1}-${start.getDate()}`;
   if (!reviewScheduleState || reviewScheduleState.key !== key) {
@@ -570,12 +579,116 @@ function getReviewMeta(now = new Date()) {
   if (!reviewScheduleState) return { leftToday: 0, totalToday: 0, nextReviewAt: '' };
   const totalToday = reviewScheduleState.slots.length;
   const pendingSlots = reviewScheduleState.slots.filter((slot) => !reviewScheduleState.consumed.has(slot.id));
-  const nextSlot = pendingSlots[0] || null;
+  let nextAtMs = null;
+  for (const slot of pendingSlots) {
+    const entry = reviewWords.find((word) => word.id === slot.id);
+    if (!entry) continue;
+    const dueMs = Date.parse(entry.dueAt || '');
+    if (!Number.isFinite(dueMs)) continue;
+    const candidateAtMs = Math.max(slot.atMs, dueMs);
+    if (!Number.isFinite(nextAtMs) || candidateAtMs < nextAtMs) nextAtMs = candidateAtMs;
+  }
+  const includeCardId = (options?.includeCardId || '').toString().trim();
+  const includesCurrent = includeCardId ? pendingSlots.some((slot) => slot.id === includeCardId) : false;
+  const leftToday = pendingSlots.length + (includeCardId && !includesCurrent ? 1 : 0);
   return {
-    leftToday: pendingSlots.length,
+    leftToday,
     totalToday,
-    nextReviewAt: nextSlot ? new Date(nextSlot.atMs).toISOString() : ''
+    nextReviewAt: Number.isFinite(nextAtMs) ? new Date(nextAtMs).toISOString() : ''
   };
+}
+
+function getTodayReviewStats(now = new Date()) {
+  const meta = getReviewMeta(now);
+  const left = Math.max(0, Number(meta.leftToday) || 0);
+  const total = Math.max(0, Number(meta.totalToday) || 0);
+  return { left, total, done: Math.max(0, total - left) };
+}
+
+function getNextPendingReviewSlot(now = new Date()) {
+  const { start } = getWorkdayBounds(now);
+  const key = `${start.getFullYear()}-${start.getMonth() + 1}-${start.getDate()}`;
+  if (!reviewScheduleState || reviewScheduleState.key !== key) {
+    reviewScheduleState = buildDailyReviewSchedule(now);
+  }
+  if (!reviewScheduleState) return null;
+  let next = null;
+  for (const slot of reviewScheduleState.slots) {
+    if (reviewScheduleState.consumed.has(slot.id)) continue;
+    const entry = reviewWords.find((word) => word.id === slot.id);
+    if (!entry) continue;
+    const dueMs = Date.parse(entry.dueAt || '');
+    if (!Number.isFinite(dueMs)) continue;
+    const candidate = { id: slot.id, atMs: Math.max(slot.atMs, dueMs) };
+    if (!next || candidate.atMs < next.atMs) next = candidate;
+  }
+  return next;
+}
+
+function showReviewCardNow(card, now = new Date()) {
+  if (!card) return false;
+  reviewPopupVisible = true;
+  lastReviewPopupAtMs = now.getTime();
+  if (reviewScheduleState) reviewScheduleState.consumed.add(card.id);
+  const sentenceTokens = buildSentenceTokensForReview(card.sentenceOriginal || '');
+  showOverlayPayload({
+    statusType: 'review-card',
+    reviewCard: {
+      ...card,
+      sentenceTokens
+    },
+    reviewMeta: getReviewMeta(now, { includeCardId: card.id })
+  }, { noFocus: true, reviewBottomRight: true, useReviewWindow: true });
+  return true;
+}
+
+function showNextReviewFromTray() {
+  const now = new Date();
+  const slot = getNextPendingReviewSlot(now);
+  if (!slot) {
+    showOverlayPayload({
+      statusType: 'translation-progress',
+      statusMessage: 'No reviews left for today.',
+      statusSubtext: 'You are caught up. Add words from captures to review later.',
+      statusPercent: 100
+    }, { noFocus: true, reviewBottomRight: true, useReviewWindow: true });
+    refreshTrayMenu();
+    return;
+  }
+  const card = reviewWords.find((entry) => entry.id === slot.id) || null;
+  if (!card) return;
+  showReviewCardNow(card, now);
+  refreshTrayMenu();
+  scheduleNextReviewPopup();
+}
+
+function buildTrayMenu() {
+  const stats = getTodayReviewStats();
+  return Menu.buildFromTemplate([
+    {
+      label: `Reviews Today: ${stats.left} left / ${stats.done} done`,
+      click: () => showNextReviewFromTray()
+    },
+    { type: 'separator' },
+    {
+      label: 'Debug Mode',
+      type: 'checkbox',
+      checked: debugMode,
+      click: (item) => {
+        debugMode = item.checked;
+        refreshTrayMenu();
+      }
+    },
+    { type: 'separator' },
+    { label: 'Preferences', click: () => openPreferencesWindow() },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() }
+  ]);
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(buildTrayMenu());
 }
 
 function pickBottomRightReviewPosition(win) {
@@ -666,20 +779,10 @@ function scheduleNextReviewPopup() {
     if (settings.reviewEnabled) {
       const card = reviewWords.find((entry) => entry.id === nextSlot.id) || null;
       if (card) {
-        reviewPopupVisible = true;
-        lastReviewPopupAtMs = Date.now();
-        if (reviewScheduleState) reviewScheduleState.consumed.add(card.id);
-        const sentenceTokens = buildSentenceTokensForReview(card.sentenceOriginal || '');
-        showOverlayPayload({
-          statusType: 'review-card',
-          reviewCard: {
-            ...card,
-            sentenceTokens
-          },
-          reviewMeta: getReviewMeta()
-        }, { noFocus: true, reviewBottomRight: true, useReviewWindow: true });
+        showReviewCardNow(card, new Date());
       }
     }
+    refreshTrayMenu();
     scheduleNextReviewPopup();
   }, delayMs);
 }
@@ -690,6 +793,7 @@ function startReviewScheduler() {
     return;
   }
   reviewScheduleState = null;
+  refreshTrayMenu();
   scheduleNextReviewPopup();
 }
 
@@ -763,6 +867,7 @@ function debugCaptureFileName(sourceTag) {
 }
 
 async function saveDebugCaptureCopy(filePath, sourceTag) {
+  if (!debugMode) return null;
   try {
     await fs.promises.mkdir(DEBUG_CAPTURE_DIR, { recursive: true });
     const outputPath = path.join(DEBUG_CAPTURE_DIR, debugCaptureFileName(sourceTag || 'capture'));
@@ -970,22 +1075,10 @@ function createTray() {
     }
   }
   tray = new Tray(icon || nativeImage.createEmpty());
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Debug Mode',
-      type: 'checkbox',
-      checked: debugMode,
-      click: (item) => { debugMode = item.checked; }
-    },
-    { type: 'separator' },
-    { label: 'Preferences', click: () => openPreferencesWindow() },
-    { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() }
-  ]);
   if (!icon) tray.setTitle('日');
   else tray.setTitle('');
   tray.setToolTip('Screenshot Translate');
-  tray.setContextMenu(contextMenu);
+  refreshTrayMenu();
 }
 
 function createSelectorWindows() {
@@ -1371,6 +1464,7 @@ ipcMain.handle('delete-review-word', async (event, payload) => {
   reviewWords = reviewWords.filter((entry) => entry.id !== id);
   if (reviewWords.length === prevCount) return { ok: false, error: 'Review card not found.' };
   await saveReviewWords();
+  startReviewScheduler();
   return { ok: true };
 });
 ipcMain.handle('lookup-kanji', async (event, payload) => {
