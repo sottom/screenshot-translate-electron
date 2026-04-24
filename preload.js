@@ -1,7 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  recognizeImage: (payload) => ipcRenderer.invoke('recognize-image', payload),
   lookupKanji: (payload) => ipcRenderer.invoke('lookup-kanji', payload),
   tokenizeReviewSentence: (payload) => ipcRenderer.invoke('tokenize-review-sentence', payload),
   saveReviewWord: (payload) => ipcRenderer.invoke('save-review-word', payload),
@@ -16,7 +15,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showOverlay: (payload) => ipcRenderer.send('show-overlay', payload),
   resizeOverlay: (payload) => ipcRenderer.send('resize-overlay', payload),
   closeOverlay: () => ipcRenderer.send('close-overlay'),
-  closeSelector: () => ipcRenderer.send('close-selector'),
   copyToClipboard: (payload) => ipcRenderer.send('copy-to-clipboard', payload),
   onShowResult: (cb) => ipcRenderer.on('show-result', (e, data) => cb(data))
 });

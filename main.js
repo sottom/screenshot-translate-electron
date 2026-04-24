@@ -47,7 +47,6 @@ class LRUCache {
 }
 
 let tray = null;
-let selectorWindows = [];
 let overlayWindow = null;
 let reviewWindow = null;
 let preferencesWindow = null;
@@ -67,8 +66,6 @@ let argosModelReady = null;
 let argosInstallPromise = null;
 let translationSetupMessage = '';
 let debugMode = process.argv.includes('--debug');
-const MAX_CAPTURE_DIMENSION = 8192;
-const MAX_CAPTURE_AREA = 36_000_000;
 const DEBUG_CAPTURE_DIR = path.join(__dirname, 'debug-captures');
 
 function debugLog(step, payload) {
@@ -114,30 +111,6 @@ function isTrustedSender(event) {
 function requireTrustedSender(event, action) {
   if (isTrustedSender(event)) return;
   throw new Error(`Blocked untrusted IPC sender for ${action}`);
-}
-
-function clampCaptureRect(input) {
-  if (!input || typeof input !== 'object' || !input.rect || typeof input.rect !== 'object') {
-    throw new Error('Invalid capture payload.');
-  }
-  const x = Number(input.rect.x);
-  const y = Number(input.rect.y);
-  const w = Number(input.rect.w);
-  const h = Number(input.rect.h);
-  if (![x, y, w, h].every(Number.isFinite)) throw new Error('Capture bounds must be finite numbers.');
-  const safeW = Math.round(w);
-  const safeH = Math.round(h);
-  if (safeW < 5 || safeH < 5) throw new Error('Capture bounds are too small.');
-  if (safeW > MAX_CAPTURE_DIMENSION || safeH > MAX_CAPTURE_DIMENSION || (safeW * safeH) > MAX_CAPTURE_AREA) {
-    throw new Error('Capture bounds are too large.');
-  }
-  return {
-    absolute: !!input.absolute,
-    x: Math.round(x),
-    y: Math.round(y),
-    w: safeW,
-    h: safeH
-  };
 }
 
 function normalizeOverlayPayload(payload) {
@@ -300,24 +273,6 @@ function applyOverlayPosition(win, width, height) {
     y = bottomY;
   }
   win.setPosition(x, y);
-}
-
-function getVirtualBounds() {
-  const displays = screen.getAllDisplays();
-  const minX = Math.min(...displays.map((d) => d.bounds.x));
-  const minY = Math.min(...displays.map((d) => d.bounds.y));
-  const maxX = Math.max(...displays.map((d) => d.bounds.x + d.bounds.width));
-  const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function closeSelectorWindows() {
-  if (selectorWindows.length === 0) return;
-  const windows = [...selectorWindows];
-  selectorWindows = [];
-  for (const win of windows) {
-    if (win && !win.isDestroyed()) win.close();
-  }
 }
 
 async function loadLocalDict() {
@@ -1081,35 +1036,6 @@ function createTray() {
   refreshTrayMenu();
 }
 
-function createSelectorWindows() {
-  closeSelectorWindows();
-  const displays = screen.getAllDisplays();
-  selectorWindows = displays.map((display) => {
-    const win = new BrowserWindow({
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height,
-      transparent: true,
-      frame: false,
-      movable: false,
-      resizable: false,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      focusable: true,
-      webPreferences: secureWebPreferences()
-    });
-    lockDownWindow(win);
-    win.setIgnoreMouseEvents(false);
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    win.loadFile(path.join(__dirname, 'selector.html'));
-    win.on('closed', () => {
-      selectorWindows = selectorWindows.filter((selector) => selector !== win);
-    });
-    return win;
-  });
-}
-
 function createOverlayWindow() {
   if (overlayWindow) return overlayWindow;
   const width = 560;
@@ -1186,7 +1112,6 @@ function registerGlobalHotkey() {
   const ok = globalShortcut.register(settings.hotkey, () => {
     handleGlobalCaptureHotkey().catch((err) => {
       console.error('Global capture hotkey failed:', err);
-      createSelectorWindows();
     });
   });
   if (!ok) console.warn(`Global shortcut registration failed for "${settings.hotkey}"`);
@@ -1235,60 +1160,6 @@ async function runOcrWithRetry(imagePath) {
     }
   }
   throw new Error('OCR failed unexpectedly.');
-}
-
-function snapshotClipboard() {
-  const formats = clipboard.availableFormats();
-  return formats.map((format) => {
-    try {
-      return { format, data: clipboard.readBuffer(format) };
-    } catch {
-      return null;
-    }
-  }).filter((entry) => entry && entry.data && entry.data.length > 0);
-}
-
-function restoreClipboard(snapshot) {
-  if (!Array.isArray(snapshot) || snapshot.length === 0) return;
-  try {
-    clipboard.clear();
-    for (const entry of snapshot) {
-      try {
-        clipboard.writeBuffer(entry.format, entry.data);
-      } catch {
-        // Ignore individual format restore failures.
-      }
-    }
-  } catch {
-    // Ignore clipboard restore errors.
-  }
-}
-
-async function captureRegionToPngTempFile(absX, absY, width, height) {
-  const previousClipboard = snapshotClipboard();
-  const tempFilePath = path.join(app.getPath('temp'), `screenshot-translate-ocr-${Date.now()}.png`);
-  try {
-    debugLog('capture:region-start', { absX, absY, width, height });
-    await execFileAsync('/usr/sbin/screencapture', ['-x', '-c', '-R', `${absX},${absY},${width},${height}`]);
-    await sleep(80);
-    const image = clipboard.readImage();
-    if (!image || image.isEmpty()) {
-      throw new Error('Region capture did not produce a clipboard image.');
-    }
-    debugLog('capture:region-image-meta', getNativeImageMeta(image));
-    const pngBuffer = image.toPNG();
-    if (!pngBuffer || pngBuffer.length === 0) {
-      throw new Error('Clipboard capture produced an empty image.');
-    }
-    debugLog('capture:region-buffer', { bytes: pngBuffer.length });
-    await fs.promises.writeFile(tempFilePath, pngBuffer);
-    await waitForImageFileReady(tempFilePath);
-    const savedPath = await saveDebugCaptureCopy(tempFilePath, 'selector');
-    if (savedPath) console.log(`[capture] selector image saved: ${savedPath}`);
-    return tempFilePath;
-  } finally {
-    restoreClipboard(previousClipboard);
-  }
 }
 
 async function processCapturedImageFile(tempFilePath, sourceTag = 'unknown') {
@@ -1372,46 +1243,17 @@ async function tryCaptureFromClipboard() {
 async function handleGlobalCaptureHotkey() {
   const clipboardResult = await tryCaptureFromClipboard();
   if (clipboardResult) return clipboardResult;
-  createSelectorWindows();
+  pushOverlayResult({
+    statusType: 'result-partial',
+    original: 'No image found in clipboard.',
+    definition: 'Take a screenshot to clipboard first, then press the hotkey again.',
+    translation: '',
+    originalLoading: false,
+    definitionLoading: false,
+    translationLoading: false
+  });
   return null;
 }
-
-ipcMain.handle('recognize-image', async (event, input) => {
-  requireTrustedSender(event, 'recognize-image');
-  let tempFilePath = null;
-  try {
-    const safeInput = clampCaptureRect(input);
-    const { x, y, w, h } = safeInput;
-    for (const win of selectorWindows) {
-      if (win && !win.isDestroyed()) win.hide();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    const virtual = getVirtualBounds();
-    const absX = safeInput.absolute ? x : Math.round(virtual.x + x);
-    const absY = safeInput.absolute ? y : Math.round(virtual.y + y);
-    const safeW = w;
-    const safeH = h;
-
-    tempFilePath = await captureRegionToPngTempFile(absX, absY, safeW, safeH);
-    return processCapturedImageFile(tempFilePath, 'selector');
-  } catch (e) {
-    console.error('Capture flow failed:', e);
-    pushOverlayResult({
-      statusType: 'result-partial',
-      original: `Capture failed: ${e?.message || 'Unknown error'}`,
-      definition: 'Try again, or use macOS screenshot to clipboard then press the hotkey.',
-      translation: '',
-      originalLoading: false,
-      definitionLoading: false,
-      translationLoading: false
-    });
-    closeSelectorWindows();
-    throw e;
-  } finally {
-    if (tempFilePath) fs.promises.unlink(tempFilePath).catch(() => {});
-  }
-});
 
 ipcMain.handle('is-debug-mode', async (event) => {
   requireTrustedSender(event, 'is-debug-mode');
@@ -1574,11 +1416,6 @@ ipcMain.on('resize-overlay', (event, payload) => {
     reviewWindow.setPosition(pos.x, pos.y);
   }
 });
-ipcMain.on('close-selector', (event) => {
-  if (!isTrustedSender(event)) return;
-  closeSelectorWindows();
-});
-
 app.whenReady().then(() => {
   app.on('web-contents-created', (_event, contents) => {
     contents.setWindowOpenHandler(() => ({ action: 'deny' }));

@@ -3,7 +3,7 @@
 Minimal macOS menu bar Electron app prototype.
 
 Features:
-- Global hotkey: `Cmd+Shift+J` — shows a fullscreen selector to drag-select a region.
+- Global hotkey: `Cmd+Shift+J` — processes the current clipboard image (take a screenshot to clipboard first).
 - Uses `kuromoji` locally for tokenization/readings and a local dictionary for offline definitions; shows a small top-right overlay for ~3s.
 - Click individual kanji in the overlay to see per-kanji readings/meanings (when local kanji dictionary is installed).
 - Optional offline sentence translation (Japanese -> English) via Argos Translate.
@@ -34,7 +34,7 @@ Build outputs are written to `dist/`.
 
 Notes:
 - OCR uses the native macOS Vision framework via the bundled `mac-ocr` binary.
- - The selection capture uses the first screen thumbnail — on some macOS setups scaling may need adjustments.
+- Capture uses the current clipboard image only (recommended flow: macOS screenshot-to-clipboard, then press hotkey).
 - The app is configured to launch automatically at login on macOS so the screenshot hotkey is ready after startup.
 
 Offline dictionary:
