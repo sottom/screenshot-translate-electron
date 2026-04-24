@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';">
+    <title>Preferences</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0f1218;
+        color: #e7ecff;
+      }
+      .wrap {
+        max-width: 680px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      h1 {
+        margin: 0 0 14px;
+        font-size: 24px;
+      }
+      .group {
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.03);
+        border-radius: 10px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+      .label {
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        opacity: 0.85;
+        margin-bottom: 6px;
+      }
+      input[type="text"], select {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid rgba(255,255,255,0.2);
+        background: #0b0f14;
+        color: #f4f8ff;
+        padding: 10px;
+        font-size: 14px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .row:last-child {
+        margin-bottom: 0;
+      }
+      .hint {
+        opacity: 0.75;
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        justify-content: flex-end;
+      }
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        background: #6366f1;
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #message {
+        min-height: 20px;
+        font-size: 13px;
+        margin-top: 10px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Screenshot Translate Preferences</h1>
+      <div class="group">
+        <div class="label">Global Shortcut</div>
+        <input id="hotkey" type="text" placeholder="CommandOrControl+Shift+J" />
+        <div class="hint">Electron accelerator syntax, e.g. CommandOrControl+Shift+J</div>
+      </div>
+      <div class="group">
+        <div class="row">
+          <span>Enable launch at login</span>
+          <input id="launchAtLogin" type="checkbox" />
+        </div>
+        <div class="row">
+          <span>Enable sentence translation</span>
+          <input id="translationEnabled" type="checkbox" />
+        </div>
+        <div class="row">
+          <span>Keep overlay open until manually closed</span>
+          <input id="overlayPinned" type="checkbox" />
+        </div>
+      </div>
+      <div class="group">
+        <div class="label">Overlay Position</div>
+        <select id="overlayPosition">
+          <option value="top-right">Top Right</option>
+          <option value="top-left">Top Left</option>
+          <option value="bottom-right">Bottom Right</option>
+          <option value="bottom-left">Bottom Left</option>
+        </select>
+        <div class="label" style="margin-top: 10px;">Overlay Font Scale</div>
+        <select id="fontScale">
+          <option value="0.9">Small</option>
+          <option value="1">Default</option>
+          <option value="1.1">Large</option>
+          <option value="1.25">Extra Large</option>
+        </select>
+      </div>
+      <div class="group">
+        <div class="row">
+          <span>Enable SRS review popups</span>
+          <input id="reviewEnabled" type="checkbox" />
+        </div>
+        <div class="hint">Reviews appear naturally during work hours (8:30 AM - 4:00 PM), without stealing focus.</div>
+      </div>
+      <div class="actions">
+        <button id="saveBtn">Save Preferences</button>
+      </div>
+      <div id="message"></div>
+    </div>
+    <script src="preferences.js"></script>
+  </body>
+</html>

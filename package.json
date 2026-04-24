@@ -1,0 +1,53 @@
+{
+  "name": "screenshot-translate-electron",
+  "version": "0.1.0",
+  "description": "macOS menu bar app: select region, OCR Japanese, show furigana + definition",
+  "main": "main.js",
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^41.2.2",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "kuromoji": "^0.1.2"
+  },
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "postinstall": "swiftc -O -o mac-ocr mac-ocr.swift",
+    "build": "electron-builder --mac",
+    "build:dir": "electron-builder --mac --dir",
+    "fetch-jmdict": "sh ./scripts/fetch_jmdict.sh",
+    "fetch-jmnedict": "sh ./scripts/fetch_jmnedict.sh",
+    "fetch-kanjidic": "sh ./scripts/fetch_kanjidic.sh",
+    "fetch-argos-ja-en-model": "python ./tools/fetch_argos_model.py",
+    "import-jmdict": "node ./tools/jmdict_to_json.js",
+    "import-jmnedict": "node ./tools/jmnedict_to_json.js",
+    "import-kanjidic": "node ./tools/kanjidic_to_json.js",
+    "setup-dict": "npm run fetch-jmdict && npm run import-jmdict && npm run fetch-jmnedict && npm run import-jmnedict && npm run fetch-kanjidic && npm run import-kanjidic && npm run fetch-argos-ja-en-model"
+  },
+  "build": {
+    "appId": "com.mitchellsotto.screenshottranslate",
+    "productName": "Screenshot Translate 2",
+    "asarUnpack": [
+      "mac-ocr",
+      "python_translate.py",
+      "models/*.argosmodel"
+    ],
+    "files": [
+      "**/*",
+      "!node_modules/.cache/**",
+      "!*.log",
+      "!.DS_Store"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  }
+}

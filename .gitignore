@@ -1,0 +1,23 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.DS_Store
+
+.env
+.env.*
+.venv/
+__pycache__/
+
+dist/
+build/
+out/
+
+# Local debug screenshot output
+ocr-debug.png
+
+# Generated dictionary artifacts
+data/dict.json
+data/JMdict_e.xml

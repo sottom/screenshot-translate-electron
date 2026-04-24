@@ -1,0 +1,1028 @@
+------------------------------
+PATH: selector.js
+------------------------------
+
+const rectEl = document.getElementById('rect');
+let startX=0, startY=0, curX=0, curY=0, selecting=false;
+let debugMode = false;
+
+window.electronAPI.isDebugMode().then((enabled) => {
+  debugMode = !!enabled;
+});
+
+function debugLog(step, payload = {}) {
+  if (!debugMode) return;
+  const msg = { step, ...payload };
+  console.log('[selector debug]', msg);
+  window.electronAPI.debugLog(msg);
+}
+
+function buildOcrCandidates(baseCanvas) {
+  const candidates = [];
+  candidates.push({ name: 'raw', dataUrl: baseCanvas.toDataURL('image/png') });
+
+  const makeVariant = (name, transformFn) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = baseCanvas.width;
+    canvas.height = baseCanvas.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(baseCanvas, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    transformFn(imageData.data);
+    ctx.putImageData(imageData, 0, 0);
+    candidates.push({ name, dataUrl: canvas.toDataURL('image/png') });
+  };
+
+  makeVariant('grayscale', (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = Math.round((0.299 * data[i]) + (0.587 * data[i + 1]) + (0.114 * data[i + 2]));
+      data[i] = gray;
+      data[i + 1] = gray;
+      data[i + 2] = gray;
+    }
+  });
+
+  makeVariant('threshold-dark-text', (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = Math.round((0.299 * data[i]) + (0.587 * data[i + 1]) + (0.114 * data[i + 2]));
+      const out = gray > 165 ? 255 : 0;
+      data[i] = out;
+      data[i + 1] = out;
+      data[i + 2] = out;
+    }
+  });
+
+  makeVariant('threshold-light-text', (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = Math.round((0.299 * data[i]) + (0.587 * data[i + 1]) + (0.114 * data[i + 2]));
+      const out = gray > 165 ? 0 : 255;
+      data[i] = out;
+      data[i + 1] = out;
+      data[i + 2] = out;
+    }
+  });
+
+  return candidates;
+}
+
+async function buildCompositeCanvas() {
+  const capture = await window.electronAPI.getScreenshot();
+  const { virtualBounds, displays } = capture;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(virtualBounds.width));
+  canvas.height = Math.max(1, Math.floor(virtualBounds.height));
+  const ctx = canvas.getContext('2d');
+
+  const drawTasks = displays.map((display) => new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const dx = display.bounds.x - virtualBounds.x;
+      const dy = display.bounds.y - virtualBounds.y;
+      ctx.drawImage(img, dx, dy, display.bounds.width, display.bounds.height);
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = display.dataUrl;
+  }));
+
+  await Promise.all(drawTasks);
+  return canvas;
+}
+
+function getDisplayForSelection(capture, x, y, w, h) {
+  const centerX = x + (w / 2);
+  const centerY = y + (h / 2);
+  return capture.displays.find((display) => {
+    const localX = display.bounds.x - capture.virtualBounds.x;
+    const localY = display.bounds.y - capture.virtualBounds.y;
+    return (
+      centerX >= localX &&
+      centerX <= localX + display.bounds.width &&
+      centerY >= localY &&
+      centerY <= localY + display.bounds.height
+    );
+  });
+}
+
+function setRect(x,y,w,h){
+  rectEl.style.left = x + 'px';
+  rectEl.style.top = y + 'px';
+  rectEl.style.width = Math.max(0,w) + 'px';
+  rectEl.style.height = Math.max(0,h) + 'px';
+  rectEl.style.display = (w>0 && h>0)?'block':'none';
+}
+
+window.addEventListener('mousedown', (e)=>{
+  selecting = true;
+  startX = e.clientX; startY = e.clientY;
+});
+
+window.addEventListener('mousemove', (e)=>{
+  if(!selecting) return;
+  curX = e.clientX; curY = e.clientY;
+  const x = Math.min(startX, curX);
+  const y = Math.min(startY, curY);
+  const w = Math.abs(curX - startX);
+  const h = Math.abs(curY - startY);
+  setRect(x,y,w,h);
+});
+
+window.addEventListener('mouseup', async (e)=>{
+  if(!selecting) return;
+  selecting = false;
+  const x = Math.min(startX, e.clientX);
+  const y = Math.min(startY, e.clientY);
+  const w = Math.abs(e.clientX - startX);
+  const h = Math.abs(e.clientY - startY);
+  
+  if (w < 5 || h < 5) { 
+    window.electronAPI.closeSelector(); 
+    return; 
+  }
+
+  try {
+    debugLog('selection:bounds', { x, y, w, h, dpr: window.devicePixelRatio || 1 });
+    const capture = await window.electronAPI.getScreenshot();
+    debugLog('capture:meta', {
+      virtualBounds: capture.virtualBounds,
+      displayCount: capture.displays.length,
+      displays: capture.displays.map((d) => ({
+        id: d.id,
+        bounds: d.bounds,
+        scaleFactor: d.scaleFactor,
+        imageSizeApprox: d.dataUrl ? d.dataUrl.length : 0
+      }))
+    });
+    const targetDisplay = getDisplayForSelection(capture, x, y, w, h);
+    let ocrCanvas = null;
+
+    if (targetDisplay) {
+      debugLog('capture:selected-display', { id: targetDisplay.id, bounds: targetDisplay.bounds });
+      const img = new Image();
+      await new Promise((resolve) => {
+        img.onload = resolve;
+        img.onerror = resolve;
+        img.src = targetDisplay.dataUrl;
+      });
+
+      if (img.width > 0 && img.height > 0) {
+        const displayOffsetX = targetDisplay.bounds.x - capture.virtualBounds.x;
+        const displayOffsetY = targetDisplay.bounds.y - capture.virtualBounds.y;
+        const relativeX = Math.max(0, x - displayOffsetX);
+        const relativeY = Math.max(0, y - displayOffsetY);
+        const relativeW = Math.min(w, targetDisplay.bounds.width - relativeX);
+        const relativeH = Math.min(h, targetDisplay.bounds.height - relativeY);
+
+        const scaleX = img.width / targetDisplay.bounds.width;
+        const scaleY = img.height / targetDisplay.bounds.height;
+
+        const sx = Math.floor(relativeX * scaleX);
+        const sy = Math.floor(relativeY * scaleY);
+        const sw = Math.max(1, Math.floor(relativeW * scaleX));
+        const sh = Math.max(1, Math.floor(relativeH * scaleY));
+
+        // Upscale a little before OCR for better Japanese recognition.
+        const upscale = 1.5;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.floor(relativeW * upscale));
+        canvas.height = Math.max(1, Math.floor(relativeH * upscale));
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        ocrCanvas = canvas;
+        debugLog('capture:cropped-native-display', {
+          sourceRect: { sx, sy, sw, sh },
+          outputRect: { width: canvas.width, height: canvas.height },
+          relativeRect: { relativeX, relativeY, relativeW, relativeH },
+          scale: { scaleX, scaleY }
+        });
+      }
+    }
+
+    if (!ocrCanvas) {
+      const composite = await buildCompositeCanvas();
+      const canvas = document.createElement('canvas');
+      const upscale = 3;
+      canvas.width = Math.max(1, Math.floor(w * upscale));
+      canvas.height = Math.max(1, Math.floor(h * upscale));
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(composite, x, y, w, h, 0, 0, canvas.width, canvas.height);
+      ocrCanvas = canvas;
+      debugLog('capture:cropped-composite-fallback', {
+        sourceRect: { x, y, w, h },
+        outputRect: { width: canvas.width, height: canvas.height }
+      });
+    }
+
+    try {
+      const candidates = buildOcrCandidates(ocrCanvas);
+      debugLog('ocr:candidates', candidates.map((c) => ({ name: c.name, imageBytesApprox: c.dataUrl.length })));
+      const result = await window.electronAPI.recognizeImage({ candidates });
+      debugLog('ocr:result', {
+        original: result.original,
+        html: result.html,
+        definition: result.definition,
+        debug: result.debug || null
+      });
+      window.electronAPI.showOverlay({ html: result.html, definition: result.definition, original: result.original });
+    } catch (err) {
+      console.error('OCR failed', err);
+      window.electronAPI.showOverlay({ html: 'OCR failed', definition: '' });
+    }
+    window.electronAPI.closeSelector();
+  } catch (err) {
+    console.error('Screenshot failed', err);
+    window.electronAPI.closeSelector();
+  }
+});
+
+window.addEventListener('keydown', (e)=>{
+  if (e.key === 'Escape') window.electronAPI.closeSelector();
+});
+
+------------------------------
+PATH: preload.js
+------------------------------
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  getScreenshot: () => ipcRenderer.invoke('get-screenshot'), // Exporting new logic
+  recognizeImage: (dataUrl) => ipcRenderer.invoke('recognize-image', dataUrl),
+  isDebugMode: () => ipcRenderer.invoke('is-debug-mode'),
+  debugLog: (payload) => ipcRenderer.send('debug-log', payload),
+  showOverlay: (payload) => ipcRenderer.send('show-overlay', payload),
+  closeSelector: () => ipcRenderer.send('close-selector'),
+  onShowResult: (cb) => ipcRenderer.on('show-result', (e, data) => cb(data))
+});
+
+------------------------------
+PATH: iconTemplate.svg
+------------------------------
+
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <rect width="24" height="24" fill="none"/>
+  <circle cx="12" cy="12" r="10" fill="#000000"/>
+  <text x="12" y="15.2" font-family="Helvetica, Arial, Noto Sans JP, sans-serif" font-size="11" fill="#ffffff" text-anchor="middle">日</text>
+</svg>
+
+
+------------------------------
+PATH: iconTemplate.png
+------------------------------
+
+PNG
+
+   
+IHDR           szz   sRGB    8eXIfMM *    i                                N@   YIDATX	A
+ 1QZ/B@ e'fU=Lؙ'}9þRw3>m@ @ @ X tW8:    IENDB`
+
+------------------------------
+PATH: overlay.js
+------------------------------
+
+window.electronAPI.onShowResult((data)=>{
+  const originalEl = document.getElementById('original');
+  const defEl = document.getElementById('definition');
+  // data.html contains ruby-markup for furigana
+  originalEl.innerHTML = data.html || (data.original || '');
+  defEl.textContent = data.definition || '';
+  // auto-dismiss after 10s
+  setTimeout(()=>{ window.close(); }, 10000);
+});
+
+
+------------------------------
+PATH: README.md
+------------------------------
+
+# Screenshot Translate Electron
+
+Minimal macOS menu bar Electron app prototype.
+
+Features:
+- Global hotkey: `Cmd+Shift+J` — shows a fullscreen selector to drag-select a region.
+- Uses `kuromoji` locally for tokenization/readings and a local dictionary for offline definitions; shows a small top-right overlay for ~3s.
+
+Run:
+
+```bash
+cd /Users/Mitchell.Sotto/Documents/code/japanese/screenshot-translate-electron
+npm install
+npm start
+```
+
+Notes:
+- This is a prototype: Tesseract is loaded from CDN in the renderer. For production, bundle the worker and models locally.
+ - The selection capture uses the first screen thumbnail — on some macOS setups scaling may need adjustments.
+
+Offline dictionary:
+
+- A local dictionary is loaded from `data/dict.json`.
+- To generate a full offline dictionary from JMdict:
+  - `npm run setup-dict`
+  - This downloads `JMdict_e.xml` and generates a large `data/dict.json`.
+
+
+------------------------------
+PATH: main.js
+------------------------------
+
+const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, nativeImage, screen, desktopCapturer } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { pathToFileURL } = require('url');
+const kuromoji = require('kuromoji');
+const { createWorker } = require('tesseract.js');
+
+let tray = null;
+let selectorWindow = null;
+let overlayWindow = null;
+let tokenizer = null;
+let localDict = {};
+let tesseractWorker = null;
+let debugMode = process.argv.includes('--debug');
+
+function debugLog(step, payload) {
+  if (!debugMode) return;
+  const stamp = new Date().toISOString();
+  if (payload === undefined) {
+    console.log(`[DEBUG ${stamp}] ${step}`);
+  } else {
+    console.log(`[DEBUG ${stamp}] ${step}`, payload);
+  }
+}
+
+function getVirtualBounds() {
+  const displays = screen.getAllDisplays();
+  const minX = Math.min(...displays.map((d) => d.bounds.x));
+  const minY = Math.min(...displays.map((d) => d.bounds.y));
+  const maxX = Math.max(...displays.map((d) => d.bounds.x + d.bounds.width));
+  const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+// [IMPROVEMENT] Async File Reading prevents the main thread from freezing on launch
+async function loadLocalDict() {
+  const dictPath = path.join(__dirname, 'data', 'dict.json');
+  try {
+    if (fs.existsSync(dictPath)) {
+      const raw = await fs.promises.readFile(dictPath, 'utf8');
+      localDict = JSON.parse(raw);
+      console.log('Loaded local dictionary entries:', Object.keys(localDict).length);
+    } else {
+      console.log('No local dict found at', dictPath);
+    }
+  } catch (e) {
+    console.error('Failed to load local dict', e);
+  }
+}
+
+function normalizeLookupKey(value) {
+  return (value || '')
+    .toString()
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[。、，,\.\(\)\[\]「」『』【】]/g, '');
+}
+
+function definitionFromDictValue(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.filter(Boolean).join('; ');
+  if (typeof value === 'object') {
+    if (Array.isArray(value.definitions)) return value.definitions.filter(Boolean).join('; ');
+    if (typeof value.definition === 'string') return value.definition;
+  }
+  return '';
+}
+
+function scoreRecognizedText(text, confidence = 0) {
+  const raw = (text || '').trim();
+  if (!raw) return -1000;
+
+  const compact = raw.replace(/\s+/g, '');
+  const jpChars = (compact.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+  const latinChars = (compact.match(/[A-Za-z]/g) || []).length;
+  const symbolChars = (compact.match(/[①-⑳⓪-⓿\u2460-\u24ff]/g) || []).length;
+  const total = Math.max(1, compact.length);
+  const jpRatio = jpChars / total;
+
+  // Favor outputs that are mostly Japanese and penalize obvious OCR garbage.
+  return (jpRatio * 120) + (jpChars * 4) + (confidence * 0.15) - (latinChars * 3) - (symbolChars * 8);
+}
+
+// [IMPROVEMENT] Initialize Tesseract globally once. Reusing the worker drastically improves capture times.
+async function initTesseract() {
+  try {
+    const tessdataDir = path.join(__dirname, 'tessdata');
+    const corePath = path.dirname(require.resolve('tesseract.js-core/tesseract-core.wasm.js'));
+    const langPath = pathToFileURL(tessdataDir).href;
+
+    tesseractWorker = await createWorker('jpn', 1, {
+      corePath,
+      langPath,
+      gzip: false,
+      cachePath: tessdataDir
+    });
+    console.log('Tesseract worker initialized');
+  } catch (e) {
+    console.error('Failed to init Tesseract:', e);
+  }
+}
+
+function katakanaToHiragana(str) {
+  // [IMPROVEMENT] Fixed broken regex matching
+  return str.replace(/[\u30A1-\u30F6]/g, (ch) => {
+    return String.fromCharCode(ch.charCodeAt(0) - 0x60);
+  });
+}
+
+function createTray() {
+  const pngPath = path.join(__dirname, 'iconTemplate.png');
+  const svgPath = path.join(__dirname, 'iconTemplate.svg');
+  let icon = null;
+  const candidates = [pngPath, svgPath];
+
+  for (const iconPath of candidates) {
+    if (!fs.existsSync(iconPath)) continue;
+    const loaded = nativeImage.createFromPath(iconPath);
+    if (!loaded.isEmpty()) {
+      icon = loaded;
+      break;
+    }
+  }
+
+  if (!icon || icon.isEmpty()) {
+    console.warn('Tray icon missing/invalid; falling back to empty icon');
+    icon = nativeImage.createEmpty();
+  } else {
+    icon.setTemplateImage(true);
+  }
+  tray = new Tray(icon);
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Debug Mode',
+      type: 'checkbox',
+      checked: debugMode,
+      click: (item) => {
+        debugMode = item.checked;
+        debugLog('debug-mode:changed', { enabled: debugMode });
+      }
+    },
+    { type: 'separator' },
+    { label: 'Preferences', click: () => { /* later */ } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() }
+  ]);
+  if (icon.isEmpty()) {
+    tray.setTitle('文');
+  }
+  tray.setToolTip('Screenshot Translate');
+  tray.setContextMenu(contextMenu);
+}
+
+function createSelectorWindow() {
+  if (selectorWindow) {
+    selectorWindow.close(); // Clean up a stuck window if one exists
+  }
+  const virtual = getVirtualBounds();
+  selectorWindow = new BrowserWindow({
+    x: virtual.x,
+    y: virtual.y,
+    width: virtual.width,
+    height: virtual.height,
+    transparent: true,
+    frame: false,
+    movable: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+  selectorWindow.setIgnoreMouseEvents(false);
+  selectorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  selectorWindow.loadFile(path.join(__dirname, 'selector.html'));
+  selectorWindow.on('closed', () => { selectorWindow = null; });
+}
+
+function createOverlayWindow() {
+  if (overlayWindow) return overlayWindow;
+  const primary = screen.getPrimaryDisplay();
+  const width = 360;
+  const height = 120;
+  overlayWindow = new BrowserWindow({
+    width,
+    height,
+    x: primary.bounds.width - width - 20,
+    y: 40,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+  overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
+  overlayWindow.on('closed', () => { overlayWindow = null; });
+  return overlayWindow;
+}
+
+app.whenReady().then(() => {
+  if (process.platform === 'darwin') app.dock.hide();
+  createTray();
+
+  loadLocalDict();
+  initTesseract();
+
+  const dictPath = path.join(__dirname, 'node_modules', 'kuromoji', 'dict');
+  kuromoji.builder({ dicPath: dictPath }).build((err, built) => {
+    if (err) {
+      console.error('kuromoji build failed', err);
+    } else {
+      tokenizer = built;
+      console.log('kuromoji tokenizer ready');
+    }
+  });
+
+  const ret = globalShortcut.register('CommandOrControl+Shift+J', () => {
+    createSelectorWindow();
+  });
+  if (!ret) console.warn('Global shortcut registration failed');
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+  if (tesseractWorker) tesseractWorker.terminate();
+});
+
+async function tokenizeAndLookup(recognizedText) {
+  const text = normalizeLookupKey(recognizedText);
+  if (!tokenizer) {
+    console.warn('Tokenizer not ready');
+    return { html: text, definition: 'Tokenizer is not ready yet.', debug: { normalizedText: text, tokens: [] } };
+  }
+  try {
+    const tokens = tokenizer.tokenize(text).filter((t) => t.surface_form && t.surface_form !== ' ');
+    const parts = tokens.map(t => {
+      const surface = t.surface_form;
+      const reading = t.reading || t.pronunciation || '';
+      let ruby = surface;
+      if (reading && reading !== '*' && reading.length > 0) {
+        const hira = katakanaToHiragana(reading);
+        // [IMPROVEMENT] Only draw Furigana if the word contains non-hiragana characters (Kanji/Katakana)
+        if (surface !== hira) {
+          ruby = `<ruby>${surface}<rt>${hira}</rt></ruby>`;
+        }
+      }
+      return { surface, reading, ruby, pos: t.pos };
+    });
+
+    const defs = [];
+    const seenKeys = new Set();
+    const seenSurface = new Set();
+    const tokenDebug = [];
+    for (const tk of tokens) {
+      const candidates = [
+        tk.basic_form && tk.basic_form !== '*' ? tk.basic_form : null,
+        tk.surface_form || null,
+        tk.reading && tk.reading !== '*' ? katakanaToHiragana(tk.reading) : null
+      ].map(normalizeLookupKey).filter(Boolean);
+
+      let matched = false;
+      let matchedKey = null;
+      let matchedDefinition = null;
+      for (const key of candidates) {
+        if (seenKeys.has(key)) continue;
+        const dictValue = localDict[key];
+        const textDef = definitionFromDictValue(dictValue);
+        if (!textDef) continue;
+        defs.push(`${tk.surface_form}: ${textDef}`);
+        seenKeys.add(key);
+        seenSurface.add(tk.surface_form);
+        matched = true;
+        matchedKey = key;
+        matchedDefinition = textDef;
+        break;
+      }
+
+      // Fallback explanation for content words when dictionary has no hit.
+      if (!matched && !seenSurface.has(tk.surface_form) && ['名詞', '動詞', '形容詞', '副詞'].includes(tk.pos)) {
+        defs.push(`${tk.surface_form}: (no local dictionary entry)`);
+        seenSurface.add(tk.surface_form);
+      }
+
+      tokenDebug.push({
+        surface: tk.surface_form,
+        basic: tk.basic_form,
+        pos: tk.pos,
+        reading: tk.reading,
+        candidates,
+        matched,
+        matchedKey,
+        matchedDefinition
+      });
+    }
+
+    const html = parts.length > 0 ? parts.map(p => p.ruby).join('') : text;
+    const definition = defs.length > 0 ? defs.join('\n') : 'No dictionary matches found for this capture.';
+    return { html, definition, debug: { normalizedText: text, tokens: tokenDebug } };
+  } catch (e) {
+    console.error('Tokenize/lookup failed', e);
+    return { html: text, definition: 'Failed to tokenize recognized text.', debug: { normalizedText: text, tokens: [] } };
+  }
+}
+
+// [IMPROVEMENT] Abstracted Screenshot from renderer process complying with Electron standard security policies
+ipcMain.handle('get-screenshot', async () => {
+  const displays = screen.getAllDisplays();
+  const maxScale = Math.max(...displays.map((d) => d.scaleFactor || 1));
+  const maxWidth = Math.max(...displays.map((d) => d.bounds.width));
+  const maxHeight = Math.max(...displays.map((d) => d.bounds.height));
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: {
+      width: Math.floor(maxWidth * maxScale),
+      height: Math.floor(maxHeight * maxScale)
+    }
+  });
+
+  const displayPayload = displays.map((display) => {
+    const source = sources.find((s) => s.display_id === display.id.toString());
+    return {
+      id: display.id,
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor || 1,
+      dataUrl: source ? source.thumbnail.toDataURL() : null
+    };
+  }).filter((d) => !!d.dataUrl);
+
+  return {
+    virtualBounds: getVirtualBounds(),
+    displays: displayPayload
+  };
+});
+
+ipcMain.handle('is-debug-mode', async () => debugMode);
+
+ipcMain.on('debug-log', (event, payload) => {
+  if (!debugMode) return;
+  debugLog('renderer', payload);
+});
+
+ipcMain.handle('recognize-image', async (event, input) => {
+  if (!tesseractWorker) throw new Error('Tesseract not ready');
+  try {
+    const request = typeof input === 'string' ? { candidates: [{ name: 'default', dataUrl: input }] } : (input || {});
+    const candidates = Array.isArray(request.candidates) && request.candidates.length > 0
+      ? request.candidates
+      : [{ name: 'default', dataUrl: request.dataUrl }];
+
+    debugLog('ocr:start', {
+      candidateCount: candidates.length,
+      candidates: candidates.map((c) => ({ name: c.name, imageBytesApprox: c.dataUrl ? c.dataUrl.length : 0 }))
+    });
+
+    let best = null;
+    for (const candidate of candidates) {
+      if (!candidate || !candidate.dataUrl) continue;
+      const result = await tesseractWorker.recognize(candidate.dataUrl);
+      const text = result?.data?.text || '';
+      const confidence = typeof result?.data?.confidence === 'number' ? result.data.confidence : 0;
+      const score = scoreRecognizedText(text, confidence);
+      const pass = {
+        name: candidate.name || 'unnamed',
+        text,
+        confidence,
+        score
+      };
+      debugLog('ocr:pass', pass);
+      if (!best || pass.score > best.score) best = pass;
+    }
+
+    const text = best ? best.text : '';
+    debugLog('ocr:best-pass', best || { text: '', confidence: 0, score: -1000 });
+    const tokenResult = await tokenizeAndLookup(text);
+    debugLog('tokenizer:normalized', tokenResult.debug ? tokenResult.debug.normalizedText : '');
+    debugLog('tokenizer:tokens', tokenResult.debug ? tokenResult.debug.tokens : []);
+    debugLog('overlay:payload', {
+      html: tokenResult.html,
+      definition: tokenResult.definition,
+      original: text
+    });
+    return {
+      html: tokenResult.html,
+      definition: tokenResult.definition,
+      original: text,
+      debug: debugMode ? {
+        ...(tokenResult.debug || {}),
+        bestOcrPass: best || null
+      } : undefined
+    };
+  } catch (e) {
+    console.error('recognize-image failed', e);
+    throw e;
+  }
+});
+
+ipcMain.on('show-overlay', (event, payload) => {
+  const win = createOverlayWindow();
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => {
+      win.webContents.send('show-result', payload);
+      win.showInactive();
+    });
+    return;
+  }
+  win.webContents.send('show-result', payload);
+  win.showInactive();
+});
+
+ipcMain.on('close-selector', () => {
+  if (selectorWindow) selectorWindow.close();
+});
+
+app.on('window-all-closed', () => {});
+
+------------------------------
+PATH: package.json
+------------------------------
+
+{
+  "name": "screenshot-translate-electron",
+  "version": "0.1.0",
+  "description": "macOS menu bar app: select region, OCR Japanese, show furigana + definition",
+  "main": "main.js",
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^25.0.0"
+  },
+  "dependencies": {
+    "kuromoji": "^0.1.2",
+    "tesseract.js": "^7.0.0",
+    "xml2js": "^0.4.23"
+  },
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "setup-tessdata": "sh ./scripts/fetch_tessdata.sh",
+    "fetch-jmdict": "sh ./scripts/fetch_jmdict.sh",
+    "import-jmdict": "node ./tools/jmdict_to_json.js",
+    "setup-dict": "npm run fetch-jmdict && npm run import-jmdict"
+  }
+}
+
+
+------------------------------
+PATH: python_helper.py
+------------------------------
+
+import os
+
+
+def combine_files(target_directory, output_file, exclude_dirs=None, exclude_files=None):
+    """
+    Combines all text-based files in a directory into a single file.
+    """
+    exclude_dirs = set(exclude_dirs or [])
+    exclude_files = set(exclude_files or [])
+
+    # Ensure the output file isn't included in its own processing
+    output_filename = os.path.basename(output_file)
+
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        for root, dirs, files in os.walk(target_directory):
+            
+            # Modify dirs in-place to skip excluded folders
+            # This prevents os.walk from even entering those folders
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
+            for filename in files:
+                # Skip the output file itself if it's in the same folder
+                if filename == output_filename:
+                    continue
+
+                file_path = os.path.join(root, filename)
+                relative_path = os.path.relpath(file_path, target_directory)
+
+                # Skip excluded files by basename or relative path
+                if filename in exclude_files or relative_path in exclude_files:
+                    print(f"Skipped: {relative_path} (Excluded file)")
+                    continue
+
+                try:
+                    # Attempt to read the file
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as infile:
+                        content = infile.read()
+                        
+                        # Write the separator and header
+                        outfile.write("-" * 30 + "\n")
+                        outfile.write(f"PATH: {relative_path}\n")
+                        outfile.write("-" * 30 + "\n\n")
+                        
+                        # Write content
+                        outfile.write(content)
+                        
+                        # Add spacing between files
+                        outfile.write("\n\n")
+                        
+                    print(f"Processed: {relative_path}")
+                
+                except Exception as e:
+                    print(f"Skipped: {relative_path} (Error: {e})")
+
+if __name__ == "__main__":
+    # --- CONFIGURATION ---
+    # Use '.' for current directory or provide a full path
+    SOURCE_DIRECTORY = '.' 
+    
+    # The name of the resulting text file
+    OUTPUT_FILENAME = 'combined_contents.txt'
+    
+    # List folder names you want to skip (e.g., '.git', 'node_modules', '__pycache__')
+    EXCLUDED_FOLDERS = {'.git', 'node_modules', '__pycache__', '.venv', '.vscode', 'dist', 'data', 'tessdata'}
+    # List file names or relative file paths you want to skip
+    EXCLUDED_FILES = {'package-lock.json'}
+    # ---------------------
+
+    combine_files(
+        SOURCE_DIRECTORY,
+        OUTPUT_FILENAME,
+        exclude_dirs=EXCLUDED_FOLDERS,
+        exclude_files=EXCLUDED_FILES,
+    )
+    print(f"\nDone! All contents saved to {OUTPUT_FILENAME}")
+
+------------------------------
+PATH: selector.html
+------------------------------
+
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://unpkg.com https://*.jsdelivr.net https://cdn.jsdelivr.net; img-src 'self' data: https:; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline';">
+    <title>Selector</title>
+    <style>
+      html,body{margin:0;height:100%;background:rgba(0,0,0,0.15);} 
+      canvas{display:block}
+      #rect{position:absolute;border:2px dashed #00f;background:rgba(0,0,255,0.1)}
+      #hint{position:fixed;left:10px;top:10px;color:white;font-family:sans-serif}
+    </style>
+  </head>
+  <body>
+    <div id="hint">Drag to select region. Esc to cancel.</div>
+    <div id="rect" style="display:none"></div>
+    <script src="selector.js"></script>
+  </body>
+</html>
+
+
+------------------------------
+PATH: overlay.html
+------------------------------
+
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline';">
+    <title>Overlay</title>
+    <style>
+      body{margin:0;padding:12px;background:rgba(0,0,0,0.6);color:white;font-family:system-ui, sans-serif;border-radius:8px}
+      .reading{font-size:12px;opacity:0.9}
+      .original{font-size:18px;font-weight:600}
+      .definition{font-size:13px;margin-top:6px;opacity:0.95}
+    </style>
+  </head>
+  <body>
+    <div class="reading" id="reading"></div>
+    <div class="original" id="original"></div>
+    <div class="definition" id="definition"></div>
+    <script src="overlay.js"></script>
+  </body>
+</html>
+
+
+------------------------------
+PATH: tools/jmdict_to_json.js
+------------------------------
+
+const fs = require('fs');
+const path = require('path');
+
+const xmlPath = process.argv[2] || path.join(__dirname, '..', 'data', 'JMdict_e.xml');
+const outPath = process.argv[3] || path.join(__dirname, '..', 'data', 'dict.json');
+
+if (!fs.existsSync(xmlPath)) {
+  console.error('JMdict XML not found at', xmlPath);
+  console.error('Download JMdict_e.xml (JMdict English) and place it at this path.');
+  process.exit(1);
+}
+
+function decodeXmlEntities(input) {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    // Drop JMdict-specific named entities from DTD (e.g. &v5k;)
+    .replace(/&[a-zA-Z0-9_+-]+;/g, '');
+}
+
+function extractAll(regex, text) {
+  const out = [];
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    out.push(decodeXmlEntities(match[1].trim()));
+  }
+  return out;
+}
+
+const xml = fs.readFileSync(xmlPath, 'utf8');
+const map = {};
+const addDefinitions = (key, definitions) => {
+  if (!key || definitions.length === 0) return;
+  if (!map[key]) map[key] = [];
+  const seen = new Set(map[key]);
+  for (const def of definitions) {
+    if (!def || seen.has(def)) continue;
+    map[key].push(def);
+    seen.add(def);
+  }
+};
+
+const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+let entryMatch;
+let entryCount = 0;
+while ((entryMatch = entryRegex.exec(xml)) !== null) {
+  entryCount += 1;
+  const block = entryMatch[1];
+  const kebs = extractAll(/<keb>([^<]+)<\/keb>/g, block);
+  const rebs = extractAll(/<reb>([^<]+)<\/reb>/g, block);
+  const glosses = extractAll(/<gloss(?:\s+[^>]*)?>([\s\S]*?)<\/gloss>/g, block)
+    .map((g) => g.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const defs = Array.from(new Set(glosses)).slice(0, 8);
+
+  for (const keb of kebs) addDefinitions(keb, defs);
+  for (const reb of rebs) addDefinitions(reb, defs);
+}
+
+fs.writeFileSync(outPath, JSON.stringify(map), 'utf8');
+console.log('Parsed entries:', entryCount);
+console.log('Written', Object.keys(map).length, 'entries to', outPath);
+
+
+------------------------------
+PATH: scripts/fetch_tessdata.sh
+------------------------------
+
+#!/usr/bin/env bash
+set -e
+# Create tessdata dir
+mkdir -p tessdata
+echo "Downloading Japanese traineddata into tessdata/"
+curl -L -o tessdata/jpn.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/jpn.traineddata
+echo "Downloaded tessdata/jpn.traineddata"
+
+
+------------------------------
+PATH: scripts/fetch_jmdict.sh
+------------------------------
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${ROOT_DIR}/data"
+mkdir -p "${DATA_DIR}"
+
+TMP_GZ="${DATA_DIR}/JMdict_e.gz"
+OUT_XML="${DATA_DIR}/JMdict_e.xml"
+
+echo "Downloading JMdict_e.gz ..."
+curl -L --fail -o "${TMP_GZ}" "http://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz"
+
+echo "Extracting to ${OUT_XML} ..."
+gunzip -c "${TMP_GZ}" > "${OUT_XML}"
+rm -f "${TMP_GZ}"
+
+echo "Done: ${OUT_XML}"
+
+
