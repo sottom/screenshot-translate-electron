@@ -18,12 +18,21 @@
         box-shadow: 0 14px 36px rgba(5, 8, 14, 0.45);
       }
       .original{
-        font-size:30px;
-        font-weight:700;
+        font-size:25px;
+        font-weight:560;
+        line-height: 1.72;
         margin-bottom:10px;
         letter-spacing:0.01em;
+        white-space: pre-wrap;
+        max-height: 260px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
       }
-      .original .token { display: inline-block; margin-right: 0.14em; }
+      .original .token { display: inline; margin-right: 0; }
       .original .save-token{
         cursor: pointer;
         border-radius: 6px;
@@ -33,7 +42,7 @@
       .original .save-token:hover{
         background: rgba(255, 255, 255, 0.14);
       }
-      .original ruby { margin-right: 0.18em; }
+      .original ruby { margin-right: 0; }
       ruby rt { font-size: 0.45em; opacity: 0.9; }
       .kanji-char{
         cursor: pointer;
@@ -80,6 +89,9 @@
         border-radius: 8px;
         background: rgba(109, 165, 255, 0.15);
         border: 1px solid rgba(109, 165, 255, 0.3);
+        max-height: 220px;
+        overflow-y: auto;
+        overflow-x: hidden;
       }
       .translation-label{
         font-size: 15px;
@@ -90,12 +102,13 @@
       }
       .translation-text{
         font-size: 22px;
-        line-height: 1.35;
+        line-height: 1.6;
         color: #e8f1ff;
+        white-space: pre-wrap;
       }
       .def-entry{
         font-size: 22px;
-        line-height: 1.4;
+        line-height: 1.58;
         padding: 8px 10px;
         border-radius: 8px;
         background: rgba(255, 255, 255, 0.06);

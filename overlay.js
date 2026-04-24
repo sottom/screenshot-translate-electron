@@ -1,4 +1,6 @@
 function resizeToContent() {
+  const MAX_OVERLAY_WIDTH = 760;
+  const MAX_OVERLAY_HEIGHT = 860;
   const measuredWidth = Math.ceil(Math.max(
     document.documentElement.scrollWidth,
     document.body.scrollWidth
@@ -7,8 +9,8 @@ function resizeToContent() {
     document.documentElement.scrollHeight,
     document.body.scrollHeight
   ));
-  const width = Math.max(380, measuredWidth);
-  const height = Math.max(140, measuredHeight);
+  const width = Math.min(MAX_OVERLAY_WIDTH, Math.max(380, measuredWidth));
+  const height = Math.min(MAX_OVERLAY_HEIGHT, Math.max(140, measuredHeight));
   if (Math.abs(width - window.innerWidth) < 2 && Math.abs(height - window.innerHeight) < 2) return;
   window.electronAPI.resizeOverlay({ width, height });
 }
@@ -37,6 +39,55 @@ function isKanjiChar(ch) {
   return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(ch || '');
 }
 
+function hardWrapLine(line, maxChars = 24) {
+  const value = (line || '').toString();
+  if (!value || value.length <= maxChars) return value;
+  const breakChars = '、，,）)]」』】〉》';
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    const remaining = value.length - cursor;
+    if (remaining <= maxChars) {
+      chunks.push(value.slice(cursor));
+      break;
+    }
+    const windowEnd = cursor + maxChars;
+    const candidate = value.slice(cursor, windowEnd);
+    let breakAt = -1;
+    for (let i = candidate.length - 1; i >= Math.max(0, candidate.length - 8); i -= 1) {
+      if (breakChars.includes(candidate[i])) {
+        breakAt = i + 1;
+        break;
+      }
+    }
+    if (breakAt <= 0) breakAt = candidate.length;
+    chunks.push(value.slice(cursor, cursor + breakAt));
+    cursor += breakAt;
+  }
+  return chunks.join('\n');
+}
+
+function formatTextForOverlay(rawText) {
+  const value = (rawText || '').toString().trim();
+  if (!value) return '';
+  const normalized = value
+    .replace(/\r\n/g, '\n')
+    .replace(/\t+/g, ' ')
+    .replace(/[ \u3000]{2,}/g, ' ');
+  const hasJapanese = /[\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff]/.test(normalized);
+  const withSentenceBreaks = hasJapanese
+    ? normalized.replace(/([。！？!?])\s*/g, '$1\n')
+    : normalized.replace(/([.!?])\s+/g, '$1\n');
+  const lines = withSentenceBreaks
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!hasJapanese) return lines.join('\n');
+  const containsNativeBreaks = normalized.includes('\n') || /[。！？]/.test(normalized);
+  if (containsNativeBreaks) return lines.join('\n');
+  return lines.map((line) => hardWrapLine(line, 24)).join('\n');
+}
+
 function appendInteractiveText(targetEl, text) {
   const value = (text || '').toString();
   if (!value) return;
@@ -62,18 +113,20 @@ function appendInteractiveText(targetEl, text) {
 function renderOriginal(originalEl) {
   originalEl.replaceChildren();
   if (!state.tokens || state.tokens.length === 0) {
-    appendInteractiveText(originalEl, state.original || '');
+    appendInteractiveText(originalEl, formatTextForOverlay(state.original || ''));
     return;
   }
   for (const token of state.tokens) {
+    const surface = (token.surface || '').toString();
+    const canSaveToken = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9]/u.test(surface);
     const tokenEl = document.createElement('span');
-    tokenEl.className = 'token save-token';
-    tokenEl.dataset.surface = token.surface || '';
-    tokenEl.dataset.saveWord = token.surface || '';
+    tokenEl.className = canSaveToken ? 'token save-token' : 'token';
+    tokenEl.dataset.surface = surface;
+    if (canSaveToken) tokenEl.dataset.saveWord = surface;
     if (token.showRuby && token.reading) {
-      tokenEl.appendChild(createRubyNode(token.surface, token.reading));
+      tokenEl.appendChild(createRubyNode(surface, token.reading));
     } else {
-      appendInteractiveText(tokenEl, token.surface || '');
+      appendInteractiveText(tokenEl, surface);
     }
     originalEl.appendChild(tokenEl);
   }
@@ -211,7 +264,7 @@ function renderTranslation(containerEl, textEl, translationText) {
     textEl.textContent = '';
     return;
   }
-  textEl.textContent = text;
+  textEl.textContent = formatTextForOverlay(text);
   containerEl.style.display = 'block';
 }
 

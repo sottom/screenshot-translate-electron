@@ -956,7 +956,8 @@ async function tokenizeAndLookup(recognizedText) {
   }
 
   try {
-    const tokens = tokenizer.tokenize(normalizedText).filter((t) => t.surface_form && t.surface_form !== ' ');
+    // Tokenize the raw OCR text so punctuation and natural sentence flow are preserved in UI rendering.
+    const tokens = tokenizer.tokenize(text).filter((t) => t.surface_form && t.surface_form !== ' ');
     const safeTokens = tokens.map((t) => {
       const surface = t.surface_form;
       const reading = t.reading || t.pronunciation || '';
@@ -1293,6 +1294,14 @@ async function tryProcessTextFromClipboard() {
 }
 
 async function handleGlobalCaptureHotkey() {
+  // Open the overlay immediately so users get instant feedback while OCR runs.
+  pushOverlayResult({
+    statusType: 'result-loading',
+    originalLoading: true,
+    definitionLoading: true,
+    translationLoading: settings.translationEnabled
+  });
+
   const clipboardTextResult = await tryProcessTextFromClipboard();
   if (clipboardTextResult) return clipboardTextResult;
 
