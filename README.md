@@ -1,3 +1,6 @@
+<!-- PURPOSE_SUMMARY -->
+**Purpose:** macOS menu-bar Electron app that OCRs Japanese from a clipboard screenshot and shows furigana, dictionary defs, and optional offline translation.
+
 # Screenshot Translate Electron
 
 Minimal macOS menu bar Electron app prototype.
